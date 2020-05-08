@@ -33,12 +33,13 @@
     div[data-tooltip]:hover:before,
     div[data-tooltip]:hover:after {
       display: inline;
+      z-index: 1000;
     }
   </style>
 </head>
 
 <body class="h-min-100 bg-near-black light-silver sans-serif">
-  <div id="content" class="mw8 center flex flex-wrap">
+  <!--<div id="content" class="mw8 center flex flex-wrap">
     <ul class="list pl0 flex flex-wrap center">
         <li class="w5 h5 ma4">
             <div>
@@ -114,7 +115,18 @@
         </li>
     </ul>
 
-  </div>
+  </div>-->
+
+  <div id="content" class="mw8 center flex flex-wrap"></div>
+
+  <!-- Load React. -->
+  <!-- Note: when deploying, replace "development.js" with "production.min.js". -->
+  <script src="https://unpkg.com/react@16/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@16/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+
+  <!-- Load our React component. -->
+  <script src="./kafka-topic-view.js" type="text/babel"></script>
 </body>
 
 </html>

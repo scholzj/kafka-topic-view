@@ -14,8 +14,8 @@ import (
 type TVPartition struct {
 	Topic     string `json:"topic"`
 	Partition int32  `json:"partition"`
-	State     string `json:"State"`
-	Leader    bool   `json:"Leader"`
+	State     string `json:"state"`
+	Leader    bool   `json:"leader"`
 }
 
 type TVBroker struct {
