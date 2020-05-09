@@ -7,6 +7,7 @@ import (
 	"github.com/Shopify/sarama"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -100,7 +101,8 @@ func createAdminClient() sarama.ClusterAdmin	{
 
 	config := sarama.NewConfig()
 	config.Version = kafkaVersion
-
+	config.Metadata.RefreshFrequency = 1 * time.Minute
+	
 	brokerList := strings.Split(bootstrapServer, ",")
 	log.Printf("Creating ClusterAdmin client for Brokers: %s", strings.Join(brokerList, ", "))
 	client, err := sarama.NewClusterAdmin(brokerList, config)
@@ -111,12 +113,87 @@ func createAdminClient() sarama.ClusterAdmin	{
 	return client
 }
 
+func findMinIsr(adminClient sarama.ClusterAdmin, brokers []*sarama.Broker)	(minIsr, minTransactionIsr int)	{
+	for _, broker := range brokers {
+		// Find default min.insync.replicas
+		isrConfigs, err := adminClient.DescribeConfig(sarama.ConfigResource{
+			Type:        4,
+			Name:        fmt.Sprint(broker.ID()),
+			ConfigNames: []string{"min.insync.replicas", "transaction.state.log.min.isr"},
+		})
+		if err != nil {
+			log.Println("Failed to get broker configuration")
+			log.Fatal(err)
+		}
+
+		log.Printf("Broker configuration %v", isrConfigs)
+
+		for _, config := range isrConfigs	{
+			if config.Name == "min.insync.replicas"	{
+				minIsr, err = strconv.Atoi(config.Value)
+				if err != nil {
+					log.Println("Failed to convert min.insync.replicas to int")
+					log.Fatal(err)
+				}
+			}
+
+			if config.Name == "transaction.state.log.min.isr"	{
+				minTransactionIsr, err = strconv.Atoi(config.Value)
+				if err != nil {
+					log.Println("Failed to convert transaction.state.log.min.isr to int")
+					log.Fatal(err)
+				}
+			}
+
+			if minIsr != 0 && minTransactionIsr != 0	{
+				log.Printf("Found out that min.insync.replicas=%d and transaction.state.log.min.isr=%d", minIsr, minTransactionIsr)
+				return
+			}
+		}
+	}
+
+	if minIsr == 0	{
+		minIsr = 1
+	}
+
+	if minTransactionIsr == 0	{
+		minTransactionIsr = 2
+	}
+
+	log.Printf("Found out that min.insync.replicas=%d and transaction.state.log.min.isr=%d", minIsr, minTransactionIsr)
+	return
+}
+
+func getPerTopicMinIsr(name string, topicDetails map[string]sarama.TopicDetail, minIsr int, minTransactionIsr int)	int	{
+	topic := topicDetails[name]
+
+	if topic.ConfigEntries != nil	{
+		minIsrConfig := topic.ConfigEntries["min.insync.replicas"]
+		if minIsrConfig != nil	{
+			minIsr, err := strconv.Atoi(*minIsrConfig)
+			if err != nil {
+				log.Println("Failed to convert min.insync.replicas to int")
+				log.Fatal(err)
+			}
+
+			return minIsr
+		}
+	}
+
+	if name == "__transaction_state"	{
+		return minTransactionIsr
+	} else {
+		return minIsr
+	}
+}
+
 func pollTopicMetadata(adminClient sarama.ClusterAdmin) 	{
 	for {
 		newData := TV{
 			Brokers: map[string]*TVBroker{},
 		}
 
+		// Get list o brokers
 		log.Println("Refreshing cluster metadata")
 		brokers, _, err := adminClient.DescribeCluster()
 		if err != nil {
@@ -131,25 +208,57 @@ func pollTopicMetadata(adminClient sarama.ClusterAdmin) 	{
 			}
 		}
 
+		minIsr, minTransactionIsr := findMinIsr(adminClient, brokers)
+
+		// List topicMetadata
+		topics, err := adminClient.ListTopics()
+		if err != nil {
+			log.Println("Failed to list topicMetadata")
+			log.Fatal(err)
+		}
+
+		log.Printf("List topicMetadata %v", topics)
+		
 		log.Println("Refreshing Topic metadata")
-		topics, err := adminClient.DescribeTopics([]string{})
+		topicMetadata, err := adminClient.DescribeTopics([]string{})
 		if err != nil {
 			log.Println("Failed to get Topic metadata")
 			log.Fatal(err)
 		}
 
-		for _, topic := range topics {
+		for _, topic := range topicMetadata {
 			//log.Println("Found Topic: ", topic.Name)
 			partitions := topic.Partitions
+			actualMinIsr := getPerTopicMinIsr(topic.Name, topics, minIsr, minTransactionIsr)
 
 			for _, partition:= range partitions	{
 				//log.Println("Found Partition: ", partition.ID)
+				replicaCount := len(partition.Replicas)
+				isrCount := len(partition.Isr)
+				offlineCount := len(partition.OfflineReplicas)
+
+				var state string
+
+				if isrCount == replicaCount && isrCount >= actualMinIsr	{
+					state = "online"
+				} else if isrCount > actualMinIsr	{
+					state = "in-sync"
+				} else if isrCount == actualMinIsr	{
+					state = "at-min-isr"
+				} else if isrCount < actualMinIsr	{
+					state = "under-min-isr"
+				} else if replicaCount >= offlineCount	{
+					state = "offline"
+				} else {
+					state = "unknown"
+				}
+
 				replicas := partition.Replicas
 				for _, replica:= range replicas	{
 					tvPartition := TVPartition{
 						Topic:     topic.Name,
 						Partition: partition.ID,
-						State:     "green",
+						State:     state,
 						Leader:    false,
 					}
 
@@ -157,7 +266,13 @@ func pollTopicMetadata(adminClient sarama.ClusterAdmin) 	{
 						tvPartition.Leader = true
 					}
 
-					newData.Brokers[fmt.Sprint(replica)].Partitions = append(newData.Brokers[fmt.Sprint(replica)].Partitions, tvPartition)
+					if newData.Brokers[fmt.Sprint(replica)] != nil	{
+						newData.Brokers[fmt.Sprint(replica)].Partitions = append(newData.Brokers[fmt.Sprint(replica)].Partitions, tvPartition)
+					} else {
+						newData.Brokers[fmt.Sprint(replica)] = &TVBroker{
+							Partitions: []TVPartition{tvPartition},
+						}
+					}
 				}
 			}
 		}

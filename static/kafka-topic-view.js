@@ -3,8 +3,6 @@
 //import React from 'react';
 //import ReactDOM from 'react';
 
-//const e = React.createElement;
-
 class Partition extends React.Component   {
     constructor(props) {
         super(props);
@@ -13,10 +11,32 @@ class Partition extends React.Component   {
     render()    {
         const leader = this.props.partition.leader ? "leader" : "follower";
         const tooltip = `${this.props.partition.topic}-${this.props.partition.partition} ${this.props.partition.state} ${leader}`;
+        const state = this.props.partition.state
+
+        let stateClassName
+        switch (state)  {
+            case "online":
+            case "in-sync":
+                stateClassName = "bg-green"
+                break;
+            case "at-min-isr":
+                stateClassName = "bg-yellow"
+                break;
+            case "under-min-isr":
+                stateClassName = "bg-orange"
+                break;
+            case "offline":
+                stateClassName = "bg-dark-red"
+                break;
+            default:
+                stateClassName = "bg-grey"
+        }
+
+        stateClassName = "ma1 w1 h1 " + stateClassName
 
         return(
             <li className="relative">
-                <div className="ma1 w1 h1 bg-green" data-tooltip={tooltip} />
+                <div className={stateClassName} data-tooltip={tooltip} />
             </li>
         );
     }
@@ -29,9 +49,9 @@ class Broker extends React.Component   {
 
     render()    {
         return(
-            <li className="w5 min-h5 ma4">
-                <div>
-                    <div className="flex items-end bg-dark-grey ba bw2 b--mid-grey w5 min-h5 center">
+            <li className="w5 h-100 ma3">
+                <div className="h-100">
+                    <div className="flex items-end bg-dark-grey ba bw2 b--mid-grey w5 h-100 center pa1">
                         <ul className="list pl0 flex flex-wrap-reverse">
                             {this.props.partitions.map((partition) => (
                                 <Partition partition={partition} key={partition.topic + "-" + partition.partition} />
@@ -70,14 +90,13 @@ class KafkaTopicView extends React.Component {
             .then((data) => {
                 this.setState({ brokers: data.brokers })
             })
-            .catch(console.log)
+            .catch((error) => {
+                this.setState({ brokers: {} })
+                console.log(error)
+            })
     }
 
     render() {
-        /*if (this.state.liked) {
-            return 'You liked this.';
-        }*/
-
         return (
             <ul className="list pl0 flex flex-wrap center">
                 {Object.keys(this.state.brokers).map((key) => (
@@ -91,4 +110,4 @@ class KafkaTopicView extends React.Component {
 ReactDOM.render(
     <KafkaTopicView />,
     document.getElementById('content')
-);
+)
