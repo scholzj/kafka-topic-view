@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/Shopify/sarama"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"strconv"
@@ -28,15 +31,16 @@ type TV struct {
 }
 
 var (
-	addr 		 	= "0.0.0.0:8080"
-	bootstrapServer = ""
-	//version  = ""
-	//group    = ""
-	//topics   = ""
-	//assignor = ""
-	//oldest   = true
-	verbose  = false
-	saramaVerbose  = false
+	listenAddr      		= "0.0.0.0:8080"
+	bootstrapServer 		= ""
+	kafkaVersion    		= "2.5.0"
+	tlsCaFile				= ""
+	tlsCertFile				= ""
+	tlsKeyFile				= ""
+	tlsInsecureSkipVerify 	= false
+	fetchInterval			= 1 * time.Minute
+	verbose  				= false
+	saramaVerbose  			= false
 
 	topicData = &TV{
 		Brokers: map[string]*TVBroker{},
@@ -44,13 +48,15 @@ var (
 )
 
 func init() {
-	flag.StringVar(&addr, "hostname", "0.0.0.0:8080", "The address where the HTTP Server runs")
+	flag.StringVar(&listenAddr, "listen-addr", "0.0.0.0:8080", "The address where the HTTP Server runs")
 	flag.StringVar(&bootstrapServer, "bootstrap-server", "", "Comma separate list of Kafka Brokers to connect to")
-	//flag.StringVar(&group, "group", "", "Kafka consumer group definition")
-	//flag.StringVar(&version, "version", "2.5.0", "Kafka cluster version")
-	//flag.StringVar(&topics, "topics", "", "Kafka topics to be consumed, as a comma separated list")
-	//flag.StringVar(&assignor, "assignor", "range", "Consumer group Partition assignment strategy (range, roundrobin, sticky)")
-	//flag.BoolVar(&oldest, "oldest", true, "Kafka consumer consume initial offset from oldest")
+	flag.DurationVar(&fetchInterval, "fetch-interval", 1 * time.Minute, "The interval at which to fetch the new topic data")
+	flag.StringVar(&kafkaVersion, "kafka-version", "2.5.0", "Version of the Kafka cluster")
+	flag.StringVar(&tlsCaFile, "tls-ca-file", "", "File with the CA certificate for server authentication")
+	flag.StringVar(&tlsCertFile, "tls-cert-file", "", "File with the client certificate for client authentication")
+	flag.StringVar(&tlsKeyFile, "tls-key-file", "", "File with the key for client authentication")
+	flag.BoolVar(&tlsInsecureSkipVerify, "tls-insecure-skip-verify", false, "Skip TLS verification " +
+		"when connecting to the Kafka brokers. Use at your own risk!")
 	flag.BoolVar(&verbose, "verbose", false, "Turn on verbose logging")
 	flag.BoolVar(&saramaVerbose, "sarama-verbose", false, "Turn on verbose logging int he Sarama Kafka client")
 	flag.Parse()
@@ -62,13 +68,13 @@ func init() {
 
 func main() {
 	adminClient := createAdminClient()
-	go pollTopicMetadata(adminClient)
+	go pollTopicForTopicData(adminClient)
 
 	http.Handle("/", http.FileServer(http.Dir("./static")))
 	http.HandleFunc("/api/topics", getTopics)
 
-	log.Println("Creating HTTP server listening on: ", addr)
-	err := http.ListenAndServe(addr, nil)
+	log.Println("Creating HTTP server listening on: ", listenAddr)
+	err := http.ListenAndServe(listenAddr, nil)
 
 	if err != nil {
 		log.Fatal(err)
@@ -94,15 +100,52 @@ func getTopics(w http.ResponseWriter, r *http.Request)	{
 }
 
 func createAdminClient() sarama.ClusterAdmin	{
-	kafkaVersion, err := sarama.ParseKafkaVersion("2.5.0")
+	kafkaVersion, err := sarama.ParseKafkaVersion(kafkaVersion)
 	if err != nil	{
 		log.Fatal(err)
 	}
 
 	config := sarama.NewConfig()
+	config.ClientID = "KafkaTopicView"
 	config.Version = kafkaVersion
 	config.Metadata.RefreshFrequency = 1 * time.Minute
-	
+
+	config.Admin.Retry.Backoff = 1 * time.Second
+	config.Admin.Retry.Max = 5
+	config.Admin.Timeout = 10 * time.Second
+
+	if len(tlsCaFile) > 0 || tlsInsecureSkipVerify == true {
+		log.Print("Enabling TLS in Kafka Admin client")
+
+		caCertPool := x509.NewCertPool()
+
+		if len(tlsCaFile) > 0 {
+			tlsCa, err := ioutil.ReadFile(tlsCaFile)
+			if err != nil {
+				log.Print("Failed to load the TLS CA certificate file")
+				log.Fatal(err)
+			}
+
+			caCertPool.AppendCertsFromPEM(tlsCa)
+		}
+
+		config.Net.TLS.Enable = true
+		config.Net.TLS.Config = &tls.Config{
+			InsecureSkipVerify: tlsInsecureSkipVerify,
+			RootCAs:            caCertPool,
+		}
+
+		if len(tlsCertFile) > 0 && len(tlsKeyFile) > 0	{
+			tlsClient, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+			if err != nil {
+				log.Print("Failed to load the TLS client certificate and key file")
+				log.Fatal(err)
+			}
+
+			config.Net.TLS.Config.Certificates = []tls.Certificate{tlsClient}
+		}
+	}
+
 	brokerList := strings.Split(bootstrapServer, ",")
 	log.Printf("Creating ClusterAdmin client for Brokers: %s", strings.Join(brokerList, ", "))
 	client, err := sarama.NewClusterAdmin(brokerList, config)
@@ -113,6 +156,7 @@ func createAdminClient() sarama.ClusterAdmin	{
 	return client
 }
 
+// Finds the min.insync.replicas configuration in this Kafka cluster
 func findMinIsr(adminClient sarama.ClusterAdmin, brokers []*sarama.Broker)	(minIsr, minTransactionIsr int)	{
 	for _, broker := range brokers {
 		// Find default min.insync.replicas
@@ -125,8 +169,6 @@ func findMinIsr(adminClient sarama.ClusterAdmin, brokers []*sarama.Broker)	(minI
 			log.Println("Failed to get broker configuration")
 			log.Fatal(err)
 		}
-
-		log.Printf("Broker configuration %v", isrConfigs)
 
 		for _, config := range isrConfigs	{
 			if config.Name == "min.insync.replicas"	{
@@ -146,7 +188,6 @@ func findMinIsr(adminClient sarama.ClusterAdmin, brokers []*sarama.Broker)	(minI
 			}
 
 			if minIsr != 0 && minTransactionIsr != 0	{
-				log.Printf("Found out that min.insync.replicas=%d and transaction.state.log.min.isr=%d", minIsr, minTransactionIsr)
 				return
 			}
 		}
@@ -160,10 +201,11 @@ func findMinIsr(adminClient sarama.ClusterAdmin, brokers []*sarama.Broker)	(minI
 		minTransactionIsr = 2
 	}
 
-	log.Printf("Found out that min.insync.replicas=%d and transaction.state.log.min.isr=%d", minIsr, minTransactionIsr)
+	//log.Printf("Found out that min.insync.replicas=%d and transaction.state.log.min.isr=%d", minIsr, minTransactionIsr)
 	return
 }
 
+// Finds out if given topic has its own configuration of min.insync.replicas and if not uses the cluster wide
 func getPerTopicMinIsr(name string, topicDetails map[string]sarama.TopicDetail, minIsr int, minTransactionIsr int)	int	{
 	topic := topicDetails[name]
 
@@ -187,14 +229,15 @@ func getPerTopicMinIsr(name string, topicDetails map[string]sarama.TopicDetail, 
 	}
 }
 
-func pollTopicMetadata(adminClient sarama.ClusterAdmin) 	{
+func pollTopicForTopicData(adminClient sarama.ClusterAdmin) 	{
 	for {
+		log.Println("Refreshing topic data")
+
 		newData := TV{
 			Brokers: map[string]*TVBroker{},
 		}
 
 		// Get list o brokers
-		log.Println("Refreshing cluster metadata")
 		brokers, _, err := adminClient.DescribeCluster()
 		if err != nil {
 			log.Println("Failed to get cluster metadata")
@@ -208,6 +251,7 @@ func pollTopicMetadata(adminClient sarama.ClusterAdmin) 	{
 			}
 		}
 
+		// Finding the min.insync.replicas configuration of thsi Kafka cluster
 		minIsr, minTransactionIsr := findMinIsr(adminClient, brokers)
 
 		// List topicMetadata
@@ -217,9 +261,7 @@ func pollTopicMetadata(adminClient sarama.ClusterAdmin) 	{
 			log.Fatal(err)
 		}
 
-		log.Printf("List topicMetadata %v", topics)
-		
-		log.Println("Refreshing Topic metadata")
+		// Describing topics to get ISR info
 		topicMetadata, err := adminClient.DescribeTopics([]string{})
 		if err != nil {
 			log.Println("Failed to get Topic metadata")
@@ -277,17 +319,11 @@ func pollTopicMetadata(adminClient sarama.ClusterAdmin) 	{
 			}
 		}
 
-		if verbose	{
-			log.Printf("Prepared new data %v\n", newData)
-
-			for _, broker := range newData.Brokers {
-				log.Printf("\tBroker: %v\n", broker)
-			}
-		}
-
 		topicData = &newData
 
-		time.Sleep(1 * time.Minute)
+		log.Println("Finished refreshing topic data. Next refresh will happen in", fetchInterval)
+
+		time.Sleep(fetchInterval)
 	}
 }
 

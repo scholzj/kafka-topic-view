@@ -1,0 +1,84 @@
+apiVersion: kafka.strimzi.io/v1beta1
+kind: KafkaUser
+metadata:
+  name: kafka-topic-view
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  authentication:
+    type: tls
+  authorization:
+    type: simple
+    acls:
+      - resource:
+          type: cluster
+        operation: DescribeConfigs
+      - resource:
+          type: topic
+          name: "*"
+        operation: Describe
+      - resource:
+          type: topic
+          name: "*"
+        operation: DescribeConfigs
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: kafka-topic-view
+  name: kafka-topic-view
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-topic-view
+  template:
+    metadata:
+      labels:
+        app: kafka-topic-view
+    spec:
+      containers:
+        - name: kafka-topic-view
+          image: scholzj/kafka-topic-view:latest
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          command:
+            - /kafka-topic-view
+            - --bootstrap-server=$(BOOTSTRAP_SERVERS)
+            - --fetch-interval=$(FETCH_INTERVAL)
+            - --tls-ca-file=/broker-certs/ca.crt
+            - --tls-cert-file=/user-certs/user.crt
+            - --tls-key-file=/user-certs/user.key
+          volumeMounts:
+            - name: user-certs
+              mountPath: /user-certs
+            - name: broker-certs
+              mountPath: /broker-certs
+          env:
+            - name: BOOTSTRAP_SERVERS
+              value: my-cluster-kafka-bootstrap:9093
+            - name: FETCH_INTERVAL
+              value: "30s"
+      volumes:
+        - name: user-certs
+          secret:
+            secretName: kafka-topic-view
+        - name: broker-certs
+          secret:
+            secretName: my-cluster-cluster-ca-cert
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: kafka-topic-view
+  name: kafka-topic-view
+spec:
+  ports:
+    - port: 80
+      targetPort: 8080
+      name: http
+  selector:
+    app: kafka-topic-view
