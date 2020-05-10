@@ -1,6 +1,9 @@
 # Kafka Topic View
 
 Kafka Topic View is a simple UI for monitoring Kafka topics and their state.
+It lists all Kafka brokers, and the partitions assigned to them.
+The partitions are listed as squares with colors from green (the partitions is in good shape) to red (the partition is under-replicated or offline).
+When you hover over the partition square, a tooltip shows the details of the partition. 
 
 ![Kafka Topic View screenshot](docs/screenshot.png)
 
