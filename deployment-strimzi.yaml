@@ -40,7 +40,7 @@ spec:
     spec:
       containers:
         - name: kafka-topic-view
-          image: scholzj/kafka-topic-view:latest
+          image: scholzj/kafka-topic-view:0.0.1
           ports:
             - containerPort: 8080
               protocol: TCP
